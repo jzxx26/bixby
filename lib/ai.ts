@@ -10,6 +10,21 @@ interface ProcessedItem {
   source_name: string;
 }
 
+// Extracts all complete JSON objects from a potentially truncated array string.
+function salvagePartialJsonArray(raw: string): Record<string, unknown>[] {
+  const results: Record<string, unknown>[] = [];
+  const objectRegex = /\{(?:[^{}]|\{[^{}]*\})*\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = objectRegex.exec(raw)) !== null) {
+    try {
+      results.push(JSON.parse(match[0]));
+    } catch {
+      // skip malformed object
+    }
+  }
+  return results;
+}
+
 export async function processWithAI(
   articles: Article[]
 ): Promise<ProcessedItem[]> {
@@ -89,9 +104,10 @@ Be selective but comprehensive. Prioritize quality, but ensure coverage across c
         },
         body: JSON.stringify({
           // Use a supported OpenRouter model. Changeable via env if desired.
-          model: process.env.OPENROUTER_MODEL || "openai/gpt-3.5-turbo",
+          model: process.env.OPENROUTER_MODEL || "openai/gpt-oss-120b:free",
           messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
+          max_tokens: 4096,
         }),
       }
     );
@@ -117,11 +133,20 @@ Be selective but comprehensive. Prioritize quality, but ensure coverage across c
       content.match(/\[\s*\{[\s\S]*\}\s*\]/);
     const jsonString = jsonMatch ? jsonMatch[1] || jsonMatch[0] : content;
 
-    const processedItems: ProcessedItem[] = JSON.parse(jsonString);
-    return processedItems;
+    try {
+      const processedItems: ProcessedItem[] = JSON.parse(jsonString);
+      return processedItems;
+    } catch {
+      // Output was truncated — salvage complete objects from the partial JSON
+      const recovered = salvagePartialJsonArray(jsonString);
+      if (recovered.length > 0) {
+        console.warn(`JSON truncated; recovered ${recovered.length} items.`);
+        return recovered as ProcessedItem[];
+      }
+      throw new Error("Could not parse or recover JSON from AI response");
+    }
   } catch (error) {
     console.error("AI processing failed:", error);
-    // Fallback: return empty or handle gracefully
     return [];
   }
 }
@@ -187,9 +212,10 @@ Return ONLY a JSON array:
           "X-Title": "Personal Daily Digest",
         },
         body: JSON.stringify({
-          model: process.env.OPENROUTER_MODEL || "openai/gpt-3.5-turbo",
+          model: process.env.OPENROUTER_MODEL || "openai/gpt-oss-120b:free",
           messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
+          max_tokens: 4096,
         }),
       }
     );
@@ -206,8 +232,17 @@ Return ONLY a JSON array:
       content.match(/\[\s*\{[\s\S]*\}\s*\]/);
     const jsonString = jsonMatch ? jsonMatch[1] || jsonMatch[0] : content;
 
-    const processedItems: ProcessedItem[] = JSON.parse(jsonString);
-    return processedItems;
+    try {
+      const processedItems: ProcessedItem[] = JSON.parse(jsonString);
+      return processedItems;
+    } catch {
+      const recovered = salvagePartialJsonArray(jsonString);
+      if (recovered.length > 0) {
+        console.warn(`JSON truncated; recovered ${recovered.length} official items.`);
+        return recovered as ProcessedItem[];
+      }
+      throw new Error("Could not parse or recover JSON from AI response");
+    }
   } catch (error) {
     console.error("AI processing for official sources failed:", error);
     // Fallback: map manually if AI fails
